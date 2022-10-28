@@ -1,1 +1,2 @@
-module.exports = require('./lib/mic');
+import mic from "./lib/mic.js";
+export default mic;
