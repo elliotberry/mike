@@ -4,7 +4,7 @@ import fs from 'fs';
 const micInstance = new mike({rate: '16000', channels: '1', debug: false, exitOnSilence: 6});
 const micInputStream = micInstance.getAudioStream();
 
-const outputFileStream = fs.WriteStream('output.raw');
+const outputFileStream = fs.WriteStream('output.wav');
 
 micInputStream.pipe(outputFileStream);
 
