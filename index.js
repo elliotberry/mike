@@ -8,6 +8,13 @@ const isWindows = os.type().includes('Windows');
 
 class Mike {
   constructor(options = {}) {
+    this._initializeOptions(options);
+    this._initializeStreams();
+    this._initializeAudioProcessOptions();
+    this.start();
+  }
+
+  _initializeOptions(options) {
     const optionDefaults = {
       rate: '16000',
       channels: '1',
@@ -24,9 +31,6 @@ class Mike {
     const { rate, channels, debug, exitOnSilence, fileType, endian, bitwidth, encoding, device } = actualOptions;
 
     this.format = `${encoding === 'unsigned-integer' ? 'U' : 'S'}${bitwidth}_${endian === 'big' ? 'BE' : 'LE'}`;
-    this.audioProcess = null;
-    this.infoStream = new PassThrough();
-    this.audioStream = new IsSilence({ debug });
     this.rate = rate;
     this.channels = channels;
     this.debug = debug;
@@ -36,74 +40,97 @@ class Mike {
     this.endian = endian;
     this.bitwidth = bitwidth;
     this.encoding = encoding;
+  }
 
-    if (debug) {
+  _initializeStreams() {
+    this.infoStream = new PassThrough();
+    this.audioStream = new IsSilence({ debug: this.debug });
+    this.audioStream.setNumSilenceFramesExitThresh(parseInt(this.exitOnSilence, 10));
+
+    if (this.debug) {
       this.infoStream.on('data', data => console.log(`Received Info: ${data}`));
       this.infoStream.on('error', error => console.log(`Error in Info Stream: ${error}`));
     }
+  }
 
+  _initializeAudioProcessOptions() {
     this.audioProcessOptions = {
-      stdio: ['ignore', 'pipe', debug ? 'pipe' : 'ignore'],
+      stdio: ['ignore', 'pipe', this.debug ? 'pipe' : 'ignore'],
     };
-
-    this.audioStream.setNumSilenceFramesExitThresh(parseInt(exitOnSilence, 10));
-    this.start();
   }
 
   start() {
     console.log('Starting Audio Process');
-    if (this.audioProcess === null) {
-      const command = isWindows ? 'sox' : isMac ? 'rec' : 'arecord';
-      const args = isWindows
-        ? ['-b', this.bitwidth, '--endian', this.endian, '-c', this.channels, '-r', this.rate, '-e', this.encoding, '-t', 'waveaudio', 'default', '-p']
-        : isMac
-        ? ['-b', this.bitwidth, '--endian', this.endian, '-c', this.channels, '-r', this.rate, '-e', this.encoding, '-t', this.fileType, '-']
-        : ['-t', this.fileType, '-c', this.channels, '-r', this.rate, '-f', this.format, '-D', this.device];
-
-      this.audioProcess = spawn(command, args, this.audioProcessOptions);
-
-      this.audioProcess.on('exit', (code, sig) => {
-        if (code !== null && sig === null) {
-          this.audioStream.emit('audioProcessExitComplete');
-          if (this.debug) console.log(`Recording audioProcess has exited with code = ${code}`);
-        }
-      });
-
-      this.audioProcess.stdout.pipe(this.audioStream);
-      if (this.debug) {
-        this.audioProcess.stderr.pipe(this.infoStream);
-      }
+    if (!this.audioProcess) {
+      this._spawnAudioProcess();
       this.audioStream.emit('startComplete');
     } else if (this.debug) {
       console.warn('Duplicate calls to start(): Microphone already started!');
     }
   }
 
-  stop() {
-    if (this.audioProcess !== null) {
-      this.audioProcess.kill('SIGTERM');
-      this.audioProcess = null;
-      this.audioStream.emit('stopComplete');
-      if (this.debug) console.log('Microphone stopped');
+  _spawnAudioProcess() {
+    const command = isWindows ? 'sox' : isMac ? 'rec' : 'arecord';
+    const args = this._getCommandArgs(command);
+
+    this.audioProcess = spawn(command, args, this.audioProcessOptions);
+    this._setupAudioProcessHandlers();
+
+    this.audioProcess.stdout.pipe(this.audioStream);
+    if (this.debug) {
+      this.audioProcess.stderr.pipe(this.infoStream);
     }
+  }
+
+  _getCommandArgs(command) {
+    if (isWindows) {
+      return ['-b', this.bitwidth, '--endian', this.endian, '-c', this.channels, '-r', this.rate, '-e', this.encoding, '-t', 'waveaudio', 'default', '-p'];
+    } else if (isMac) {
+      return ['-b', this.bitwidth, '--endian', this.endian, '-c', this.channels, '-r', this.rate, '-e', this.encoding, '-t', this.fileType, '-'];
+    } else {
+      return ['-t', this.fileType, '-c', this.channels, '-r', this.rate, '-f', this.format, '-D', this.device];
+    }
+  }
+
+  _setupAudioProcessHandlers() {
+    this.audioProcess.on('exit', (code, sig) => {
+      if (code !== null && sig === null) {
+        this.audioStream.emit('audioProcessExitComplete');
+        if (this.debug) console.log(`Recording audioProcess has exited with code = ${code}`);
+      }
+    });
+  }
+
+  stop() {
+    this._terminateAudioProcess('Microphone stopped', 'stopComplete');
   }
 
   pause() {
-    if (this.audioProcess !== null) {
-      this.audioProcess.kill('SIGSTOP');
-      this.audioStream.pause();
-      this.audioStream.emit('pauseComplete');
-      if (this.debug) console.log('Microphone paused');
-    }
+    this._controlAudioProcess('SIGSTOP', 'Microphone paused', 'pauseComplete', 'pause');
   }
 
   resume() {
-    if (this.audioProcess !== null) {
-      this.audioProcess.kill('SIGCONT');
-      this.audioStream.resume();
-      this.audioStream.emit('resumeComplete');
-      if (this.debug) console.log('Microphone resumed');
+    this._controlAudioProcess('SIGCONT', 'Microphone resumed', 'resumeComplete', 'resume');
+  }
+
+  _terminateAudioProcess(logMessage, event) {
+    if (!this.audioProcess) {
+      return;
     }
+    this.audioProcess.kill('SIGTERM');
+    this.audioProcess = null;
+    this.audioStream.emit(event);
+    if (this.debug) console.log(logMessage);
+  }
+
+  _controlAudioProcess(signal, logMessage, event, method) {
+    if (!this.audioProcess) {
+      return;
+    }
+    this.audioProcess.kill(signal);
+    this.audioStream[method]();
+    this.audioStream.emit(event);
+    if (this.debug) console.log(logMessage);
   }
 
   getAudioStream() {
